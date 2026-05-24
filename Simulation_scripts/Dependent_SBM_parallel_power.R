@@ -20,9 +20,9 @@ ncores <- 10
 method_specs <- list(
   KAP = list(type = "raw"),
   KAP_dependent = list(type = "lag_adjusted", kernel = "K_resid_mean", max_lag = Inf),
-  KAP_dependent_lag = list(type = "lag_adjusted", kernel = "K_resid_mean", max_lag = 6),
-  KAP_dependent_lag2 = list(type = "lag_adjusted", kernel = "K_resid_mean", max_lag = 12),
-  KAP_dependent_lag_adjust2 = list(type = "lag_adjusted", kernel = "K_resid_mean2", max_lag = 6)
+  KAP_dependent_lag6 = list(type = "lag_adjusted", kernel = "K_resid_mean", max_lag = 6),
+  KAP_dependent_lag12 = list(type = "lag_adjusted", kernel = "K_resid_mean", max_lag = 12),
+  KAP_dependent_lag6_adjust2 = list(type = "lag_adjusted", kernel = "K_resid_mean2", max_lag = 6)
 )
 
 make_kernel_pair <- function(K1_raw, K2_raw, spec) {

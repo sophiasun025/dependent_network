@@ -299,52 +299,7 @@ plot_matrix_heatmap <- function(M, title = "Kernel Matrix Heat Map") {
     theme_minimal()
 }
 
-make_kernel_pair <- function(K1_raw, K2_raw, spec) {
-  if (spec$type == "raw") {
-    return(list(K1 = K1_raw, K2 = K2_raw))
-  }
-  
-  K1_adjusted <- remove_lag_effect(K1_raw, max_lag = spec$max_lag)[[spec$kernel]]
-  K2_adjusted <- remove_lag_effect(K2_raw, max_lag = spec$max_lag)[[spec$kernel]]
-  
-  list(K1 = K1_adjusted, K2 = K2_adjusted)
-}
 
-KAP_CPD_modified <- function(K1_raw, K2_raw, spec, r1 = 0.5, r2 = 2, n,
-                             n0 = ceiling(0.05 * n), n1 = floor(0.95 * n)) {
-  kernels <- make_kernel_pair(K1_raw, K2_raw, spec)
-  KAP_CPD_statistic(kernels$K1, kernels$K2, r1, r2, n, n0, n1)
-}
-
-permpval_modified <- function(n, K1_raw, K2_raw, spec, B = 1000,
-                              n0 = ceiling(0.05 * n), n1 = floor(0.95 * n)) {
-  if (n0 < 2) {
-    n0 <- 2
-  }
-  if (n1 > (n - 2)) {
-    n1 <- n - 2
-  }
-  
-  S <- matrix(0, B, n)
-  scanZ <- KAP_CPD_modified(K1_raw, K2_raw, spec, n = n, n0 = n0, n1 = n1)
-  
-  for (b in 1:B) {
-    if (b %% 1000 == 0) {
-      message(b, " permutations completed.\n")
-    }
-    
-    id0 <- sample(1:n, replace = FALSE)
-    K1_id <- K1_raw[id0, id0]
-    K2_id <- K2_raw[id0, id0]
-    Sstar <- KAP_CPD_modified(K1_id, K2_id, spec, n = n, n0 = n0, n1 = n1)
-    
-    S[b, ] <- Sstar$S$scan
-  }
-  
-  max_S <- apply(S[, n0:n1], 1, max)
-  max_S_sort <- sort(max_S)
-  min(1, length(which(max_S_sort >= max(scanZ$S$scan[n0:n1]))) / B)
-}
 
 
 
