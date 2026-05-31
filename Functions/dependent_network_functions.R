@@ -166,19 +166,16 @@ remove_global_lag_effect_test <- function(K,max_lag,include_diag = FALSE) {
 }
 
 
-remove_lag_effect <- function(K, max_lag = Inf, include_diag = FALSE) {
+remove_lag_effect <- function(K, max_lag = Inf, s = 0.6) {
+  #returns 4 lag adjusted Kernel matrix:
+  #K_resid_raw_mean, K_resid_raw_mean_smooth, K_ratio_mean, K_ratio_mean_smooth
   n <- nrow(K)
   K_work <- K
+  diag(K_work) <- NA
   
-  # Usually ignore diagonal because K_ii is self-similarity
-  if (!include_diag) {
-    diag(K_work) <- NA
-  }
-  
-  # lag_mat[i, j] = |i - j|
+  #Create lags related statistics
   lag_mat <- abs(row(K_work) - col(K_work))
   
-  # Mean / median / sd kernel value for each lag h
   lag_mean <- tapply(
     as.vector(K_work),
     as.vector(lag_mat),
@@ -199,77 +196,97 @@ remove_lag_effect <- function(K, max_lag = Inf, include_diag = FALSE) {
     sd,
     na.rm = TRUE
   )
-  
-  lag_median_median <- median(lag_median, na.rm = TRUE)
   lag_mean_mean <- mean(lag_mean, na.rm = TRUE)
+  lag_mean_median <- median(lag_mean, na.rm = TRUE)
+  lag_median_median <- median(lag_median, na.rm = TRUE)
+  lag_mean_sd=sd(lag_mean, na.rm = TRUE)
+  lag_median_sd=sd(lag_median, na.rm = TRUE)
   
-  # Lag-specific adjustment values
-  lag_adjust_mean <- lag_mean / lag_mean_mean * lag_sd
-  lag_adjust_mean2 <- (lag_mean - lag_mean_mean) / lag_sd
-  lag_adjust_median <- lag_median / lag_median_median * lag_sd
-  lag_adjust_mean[!is.finite(lag_adjust_mean)] <- 0
-  lag_adjust_mean2[!is.finite(lag_adjust_mean2)] <- 0
-  lag_adjust_median[!is.finite(lag_adjust_median)] <- 0
+  #Function that fits a smoothing spline
+  smooth_adjustment <- function(lag_mean) {
+    lags <- as.numeric(names(lag_mean))
+    valid <- is.finite(lags) & is.finite(lag_mean)
+    if (sum(valid) < 4 || length(unique(lags[valid])) < 4) {
+      return(lag_mean)
+    }
+    fit <- smooth.spline(
+      x = lags[valid],
+      y = as.numeric(lag_mean[valid]),
+      spar = s
+    )
+    x_smooth <- predict(fit, x = lags)$y
+    names(x_smooth) <- names(lag_mean)
+    x_smooth
+  }
   
-  # Build full adjustment matrices
-  adjust_mat_mean <- matrix(
-    lag_adjust_mean[as.character(lag_mat)],
-    nrow = n,
-    ncol = n
-  )
+
   
-  adjust_mat_mean2 <- matrix(
-    lag_adjust_mean2[as.character(lag_mat)],
-    nrow = n,
-    ncol = n
-  )
+  #lag-specific adjustment families and convert the lags into matrices
+  lag_adjust_raw_mean <- lag_mean
+  lag_adjust_raw_median <- lag_median
+  lag_adjust_raw_mean_smooth <- smooth_adjustment(lag_adjust_raw_mean)
+  lag_adjust_raw_median_smooth <- smooth_adjustment(lag_adjust_raw_median)
   
-  adjust_mat_median <- matrix(
-    lag_adjust_median[as.character(lag_mat)],
-    nrow = n,
-    ncol = n
-  )
+  build_adjustment_matrix <- function(lag_adjustment) {
+    adjust_mat <- matrix(
+      lag_adjustment[as.character(lag_mat)],
+      nrow = n,
+      ncol = n
+    )
+    adjust_mat[!is.finite(adjust_mat)] <- 0
+    adjust_mat
+  }
   
-  # Only adjust lags up to max_lag
+  #as adj matrix
+  adjust_mat_raw_mean <- build_adjustment_matrix(lag_adjust_raw_mean)
+  adjust_mat_raw_median <- build_adjustment_matrix(lag_adjust_raw_median)
+  adjust_mat_raw_mean_smooth <- build_adjustment_matrix(lag_adjust_raw_mean_smooth)
+  adjust_mat_raw_median_smooth <- build_adjustment_matrix(lag_adjust_raw_median_smooth)
+  
+  #only adjust up to max lag
   use_idx <- lag_mat <= max_lag
-  
-  # If not including diagonal, do not adjust diagonal
-  if (!include_diag) {
-    use_idx[lag_mat == 0] <- FALSE
+  use_idx[lag_mat == 0] <- FALSE
+  adjust_mat_raw_mean[!use_idx] <- 0
+  adjust_mat_raw_mean_smooth[!use_idx] <- 0
+  residual_kernel <- function(adjust_mat) {
+    K_resid <- K - adjust_mat
+    diag(K_resid) <- 0
+    (K_resid + t(K_resid)) / 2
+  }
+
+  ratio_kernel <- function(adjust_mat,mm) {
+    K_ratio <- K
+    ratio_idx <- is.finite(adjust_mat) & adjust_mat != 0
+    if (is.finite(mm)) {
+      K_ratio[ratio_idx] <- K[ratio_idx] / adjust_mat[ratio_idx] * mm
+    }
+    (K_ratio + t(K_ratio)) / 2
   }
   
-  # Entries with lag > max_lag receive zero adjustment
-  adjust_mat_mean[!use_idx] <- 0
-  adjust_mat_mean2[!use_idx] <- 0
-  adjust_mat_median[!use_idx] <- 0
-  
-  # Remove lag effect
-  K_resid_mean <- K - adjust_mat_mean
-  K_resid_mean2 <- K - adjust_mat_mean2
-  K_resid_median <- K - adjust_mat_median
-  
-  # If diagonal was ignored, set residual diagonal to 0
-  if (!include_diag) {
-    diag(K_resid_mean) <- 0
-    diag(K_resid_mean2) <- 0
-    diag(K_resid_median) <- 0
-  }
-  
-  # Enforce symmetry
-  K_resid_mean <- (K_resid_mean + t(K_resid_mean)) / 2
-  K_resid_mean2 <- (K_resid_mean2 + t(K_resid_mean2)) / 2
-  K_resid_median <- (K_resid_median + t(K_resid_median)) / 2
+  #construct adjusted Kernel matrix
+  #1,2
+  K_resid_raw_mean <- residual_kernel(adjust_mat_raw_mean)
+  K_resid_raw_mean_smooth <- residual_kernel(adjust_mat_raw_mean_smooth)
+  #3,4
+  # K_ratio_mean <- ratio_kernel(adjust_mat_raw_mean,lag_mean_mean)
+  # K_ratio_mean_smooth <- ratio_kernel(adjust_mat_raw_mean_smooth,lag_mean_mean)
+  #3,4
+  K_ratio_median <- ratio_kernel(adjust_mat_raw_median,lag_median_median)
+  K_ratio_median_smooth <- ratio_kernel(adjust_mat_raw_median_smooth,lag_median_median)
   
   list(
-    K_resid_mean = K_resid_mean,
-    K_resid_mean2 = K_resid_mean2,
-    K_resid_median = K_resid_median,
+    K_resid_raw_mean = K_resid_raw_mean,
+    K_resid_raw_mean_smooth = K_resid_raw_mean_smooth,
+    # K_ratio_mean=K_ratio_mean,
+    # K_ratio_mean_smooth=K_ratio_mean_smooth,
+    K_ratio_median=K_ratio_median,
+    K_ratio_median_smooth=K_ratio_median_smooth,
+    
     lag_mean = lag_mean,
     lag_median = lag_median,
-    lag_sd = lag_sd,
-    lag_adjust_mean = lag_adjust_mean,
-    lag_adjust_mean2 = lag_adjust_mean2,
-    lag_adjust_median = lag_adjust_median,
+    lag_mean_sd = lag_mean_sd,
+    lag_adjust_raw_mean_smooth = lag_adjust_raw_mean_smooth,
+   
     max_lag = max_lag
   )
 }
