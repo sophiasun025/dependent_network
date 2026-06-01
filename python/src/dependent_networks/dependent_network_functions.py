@@ -572,6 +572,53 @@ def _remove_lag_effect_jax_raw(K: jax.Array, max_lag: float) -> tuple[jax.Array,
     )
 
 
+@jax.jit
+def _remove_lag_resid_raw_mean_jax(K: jax.Array, max_lag: float) -> jax.Array:
+    n = K.shape[0]
+    diag_mask = jnp.eye(n, dtype=bool)
+    K_work = jnp.where(diag_mask, jnp.nan, K)
+    lag_mat = jnp.abs(jnp.arange(n)[:, None] - jnp.arange(n)[None, :])
+    lag_mean, _, _ = _lag_stats_jax(K_work, lag_mat)
+
+    adjust_mat = lag_mean[lag_mat]
+    adjust_mat = jnp.where(jnp.isfinite(adjust_mat), adjust_mat, 0.0)
+    use_idx = (lag_mat <= max_lag) & (lag_mat != 0)
+    adjust_mat = jnp.where(use_idx, adjust_mat, 0.0)
+
+    K_resid = K - adjust_mat
+    K_resid = jnp.where(diag_mask, 0.0, K_resid)
+    return (K_resid + K_resid.T) / 2.0
+
+
+@jax.jit
+def _remove_lag_ratio_median_jax(K: jax.Array, max_lag: float) -> jax.Array:
+    del max_lag  # Kept for API symmetry; current R ratio path is not max-lag masked.
+    n = K.shape[0]
+    diag_mask = jnp.eye(n, dtype=bool)
+    K_work = jnp.where(diag_mask, jnp.nan, K)
+    lag_mat = jnp.abs(jnp.arange(n)[:, None] - jnp.arange(n)[None, :])
+    _, lag_median, _ = _lag_stats_jax(K_work, lag_mat)
+    lag_median_median = jnp.nanmedian(lag_median)
+
+    adjust_mat = lag_median[lag_mat]
+    adjust_mat = jnp.where(jnp.isfinite(adjust_mat), adjust_mat, 0.0)
+    ratio_idx = jnp.isfinite(adjust_mat) & (adjust_mat != 0)
+    K_ratio = jnp.where(
+        ratio_idx & jnp.isfinite(lag_median_median),
+        K / adjust_mat * lag_median_median,
+        K,
+    )
+    return (K_ratio + K_ratio.T) / 2.0
+
+
+def _select_lag_adjusted_kernel_jax(K: jax.Array, adjust_type: str, max_lag: float) -> jax.Array:
+    if adjust_type == "K_resid_raw_mean":
+        return _remove_lag_resid_raw_mean_jax(K, max_lag)
+    if adjust_type == "K_ratio_median":
+        return _remove_lag_ratio_median_jax(K, max_lag)
+    raise ValueError("adjust_type must be 'K_resid_raw_mean' or 'K_ratio_median'")
+
+
 def remove_lag_effect_jax(K: Array, max_lag: float = np.inf) -> dict[str, Any]:
     """JAX-accelerated raw lag-effect removal.
 
@@ -784,7 +831,7 @@ def _kap_cpd_permutation_pvalue_jax_core(
     n0_idx: int,
     n1_idx_exclusive: int,
     B: int,
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     observed = _kap_cpd_statistic_jax_core(K1, K2, r1, r2)
     observed_S = observed[12]
     observed_max = jnp.nanmax(observed_S[n0_idx:n1_idx_exclusive])
@@ -802,7 +849,7 @@ def _kap_cpd_permutation_pvalue_jax_core(
 
     max_S = jax.vmap(permutation_max_S)(keys)
     pvalue = jnp.minimum(1.0, jnp.mean(max_S >= observed_max))
-    return pvalue, observed_max
+    return pvalue, observed_max, max_S
 
 
 def kap_cpd_permutation_pvalue(
@@ -848,7 +895,7 @@ def kap_cpd_permutation_pvalue(
     if n0 > n1:
         raise ValueError("n0 must be <= n1 after boundary adjustment")
 
-    pvalue, observed_max = _kap_cpd_permutation_pvalue_jax_core(
+    pvalue, observed_max, max_S = _kap_cpd_permutation_pvalue_jax_core(
         jrandom.PRNGKey(seed),
         jnp.asarray(K1_np),
         jnp.asarray(K2_np),
@@ -863,12 +910,195 @@ def kap_cpd_permutation_pvalue(
         return {
             "pvalue": float(pvalue),
             "observed_max_S": float(observed_max),
+            "permuted_max_S": np.asarray(max_S),
             "B": B,
             "n0": n0,
             "n1": n1,
             "seed": seed,
         }
     return float(pvalue)
+
+
+def kap_cpd_permutation_pvalue_batched(
+    K1: Array,
+    K2: Array,
+    B: int = 1000,
+    batch_size: int = 50,
+    r1: float = 0.5,
+    r2: float = 2.0,
+    n: int | None = None,
+    n0: int | None = None,
+    n1: int | None = None,
+    seed: int = 0,
+    return_distribution: bool = False,
+) -> float | dict[str, Any]:
+    """Memory-batched permutation p-value for the original KAP-CPD S statistic.
+
+    This computes the same quantity as `kap_cpd_permutation_pvalue`, but splits
+    permutations into batches so JAX does not materialize all B permutations at
+    once. This is safer for Colab/GPU memory.
+    """
+
+    if B < 1:
+        raise ValueError("B must be at least 1")
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+
+    K1_np = np.asarray(K1, dtype=np.float64)
+    K2_np = np.asarray(K2, dtype=np.float64)
+    if K1_np.shape != K2_np.shape or K1_np.ndim != 2 or K1_np.shape[0] != K1_np.shape[1]:
+        raise ValueError("K1 and K2 must be square matrices with the same shape")
+
+    n_actual = K1_np.shape[0]
+    if n is None:
+        n = n_actual
+    elif n != n_actual:
+        raise ValueError(f"n={n} does not match matrix size {n_actual}")
+
+    if n0 is None:
+        n0 = int(np.ceil(0.05 * n))
+    if n1 is None:
+        n1 = int(np.floor(0.95 * n))
+    n0 = max(n0, 2)
+    n1 = min(n1, n - 2)
+    if n0 > n1:
+        raise ValueError("n0 must be <= n1 after boundary adjustment")
+
+    K1_jax = jnp.asarray(K1_np)
+    K2_jax = jnp.asarray(K2_np)
+    key = jrandom.PRNGKey(seed)
+    remaining = int(B)
+    exceed_count = 0
+    observed_max_value: float | None = None
+    max_values: list[np.ndarray] = []
+
+    while remaining > 0:
+        current_batch = min(batch_size, remaining)
+        key, subkey = jrandom.split(key)
+        _, observed_max, max_S = _kap_cpd_permutation_pvalue_jax_core(
+            subkey,
+            K1_jax,
+            K2_jax,
+            float(r1),
+            float(r2),
+            n0 - 1,
+            n1,
+            current_batch,
+        )
+        observed_max_float = float(observed_max)
+        if observed_max_value is None:
+            observed_max_value = observed_max_float
+        max_S_np = np.asarray(max_S)
+        exceed_count += int(np.sum(max_S_np >= observed_max_float))
+        if return_distribution:
+            max_values.append(max_S_np)
+        remaining -= current_batch
+
+    pvalue = min(1.0, exceed_count / B)
+    if return_distribution:
+        return {
+            "pvalue": pvalue,
+            "observed_max_S": observed_max_value,
+            "permuted_max_S": np.concatenate(max_values) if max_values else np.array([]),
+            "B": B,
+            "batch_size": batch_size,
+            "n0": n0,
+            "n1": n1,
+            "seed": seed,
+        }
+    return pvalue
+
+
+def kap_cpd_permutation_pvalue_dependent_batched(
+    K1: Array,
+    K2: Array,
+    adjust_type: str,
+    max_lag: float,
+    B: int = 1000,
+    batch_size: int = 50,
+    r1: float = 0.5,
+    r2: float = 2.0,
+    n: int | None = None,
+    n0: int | None = None,
+    n1: int | None = None,
+    seed: int = 0,
+    return_distribution: bool = False,
+) -> float | dict[str, Any]:
+    """Memory-batched permutation p-value for lag-adjusted KAP-CPD.
+
+    Supports `adjust_type="K_resid_raw_mean"` and `adjust_type="K_ratio_median"`.
+    """
+
+    if B < 1:
+        raise ValueError("B must be at least 1")
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+
+    K1_np = np.asarray(K1, dtype=np.float64)
+    K2_np = np.asarray(K2, dtype=np.float64)
+    if K1_np.shape != K2_np.shape or K1_np.ndim != 2 or K1_np.shape[0] != K1_np.shape[1]:
+        raise ValueError("K1 and K2 must be square matrices with the same shape")
+
+    n_actual = K1_np.shape[0]
+    if n is None:
+        n = n_actual
+    elif n != n_actual:
+        raise ValueError(f"n={n} does not match matrix size {n_actual}")
+
+    if n0 is None:
+        n0 = int(np.ceil(0.05 * n))
+    if n1 is None:
+        n1 = int(np.floor(0.95 * n))
+    n0 = max(n0, 2)
+    n1 = min(n1, n - 2)
+    if n0 > n1:
+        raise ValueError("n0 must be <= n1 after boundary adjustment")
+
+    K1_jax = jnp.asarray(K1_np)
+    K2_jax = jnp.asarray(K2_np)
+    key = jrandom.PRNGKey(seed)
+    remaining = int(B)
+    exceed_count = 0
+    observed_max_value: float | None = None
+    max_values: list[np.ndarray] = []
+
+    while remaining > 0:
+        current_batch = min(batch_size, remaining)
+        key, subkey = jrandom.split(key)
+        _, observed_max, max_S = _kap_cpd_permutation_pvalue_dependent_jax_core(
+            subkey,
+            K1_jax,
+            K2_jax,
+            float(max_lag),
+            adjust_type,
+            float(r1),
+            float(r2),
+            n0 - 1,
+            n1,
+            current_batch,
+        )
+        observed_max_float = float(observed_max)
+        if observed_max_value is None:
+            observed_max_value = observed_max_float
+        max_S_np = np.asarray(max_S)
+        exceed_count += int(np.sum(max_S_np >= observed_max_float))
+        if return_distribution:
+            max_values.append(max_S_np)
+        remaining -= current_batch
+
+    pvalue = min(1.0, exceed_count / B)
+    if return_distribution:
+        return {
+            "pvalue": pvalue,
+            "observed_max_S": observed_max_value,
+            "permuted_max_S": np.concatenate(max_values) if max_values else np.array([]),
+            "B": B,
+            "batch_size": batch_size,
+            "n0": n0,
+            "n1": n1,
+            "seed": seed,
+        }
+    return pvalue
 
 
 def _scan_summary(scan: Array, n0: int, n1: int, use_abs: bool = False, field: str = "Zmax") -> dict[str, Any]:
@@ -971,8 +1201,8 @@ def kap_cpd_statistic_dependent(
     The returned dictionary mirrors the R list names. Arrays are length `n`, and
     `tauhat` values use the same 1-based time indexing as the original R code.
     """
-    K1=remove_lag_effect_jax(K1_raw,max_lag=max_lag)[adjust_type]
-    K2=remove_lag_effect_jax(K2_raw,max_lag=max_lag)[adjust_type]
+    K1 = np.asarray(_select_lag_adjusted_kernel_jax(jnp.asarray(K1_raw, dtype=jnp.float64), adjust_type, float(max_lag)))
+    K2 = np.asarray(_select_lag_adjusted_kernel_jax(jnp.asarray(K2_raw, dtype=jnp.float64), adjust_type, float(max_lag)))
     K1_np = np.asarray(K1, dtype=np.float64)
     K2_np = np.asarray(K2, dtype=np.float64)
     if K1_np.shape != K2_np.shape or K1_np.ndim != 2 or K1_np.shape[0] != K1_np.shape[1]:
@@ -1044,12 +1274,7 @@ def _kap_cpd_permutation_pvalue_dependent_jax_core(
     B: int,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     def adjust_kernel(K_raw: jax.Array) -> jax.Array:
-        adjusted = _remove_lag_effect_jax_raw(K_raw, max_lag)
-        if adjust_type == "K_resid_raw_mean":
-            return adjusted[0]
-        if adjust_type == "K_ratio_median":
-            return adjusted[1]
-        raise ValueError("adjust_type must be 'K_resid_raw_mean' or 'K_ratio_median'")
+        return _select_lag_adjusted_kernel_jax(K_raw, adjust_type, max_lag)
 
     K1 = adjust_kernel(K1_raw)
     K2 = adjust_kernel(K2_raw)
