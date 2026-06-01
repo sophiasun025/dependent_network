@@ -14,6 +14,7 @@ import tempfile
 from typing import Any
 
 import jax
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from jax import lax
 from jax import random as jrandom
@@ -85,7 +86,7 @@ def _gaussian_kernel_jax_r(X: jax.Array) -> jax.Array:
 def gaussian_kernel_jax(X: Array) -> Array:
     """JAX-accelerated Gaussian kernel matching the original R function."""
 
-    X_jax = jnp.asarray(X, dtype=jnp.float32)
+    X_jax = jnp.asarray(X, dtype=jnp.float64)
     if X_jax.ndim != 2:
         raise ValueError("X must be a 2D array")
     return np.asarray(_gaussian_kernel_jax_r(X_jax))
@@ -101,7 +102,7 @@ def _make_probability_matrices_jax(
     block_nums_jax = jnp.asarray(block_nums, dtype=jnp.int32)
     community = jnp.repeat(jnp.arange(1, block_nums_jax.size + 1), block_nums_jax, total_repeat_length=int(np.sum(block_nums)))
     same_community = community[:, None] == community[None, :]
-    non_diag = 1.0 - jnp.eye(community.size, dtype=jnp.float32)
+    non_diag = 1.0 - jnp.eye(community.size, dtype=jnp.float64)
 
     E_before = jnp.where(same_community, p_within_before, p_across_before) * non_diag
     E_after = jnp.where(same_community, p_within_after, p_across_after) * non_diag
@@ -130,7 +131,7 @@ def _generate_adjacency_sequence_jax(
         key_new, draw_key = jrandom.split(key_old)
         E_current = jnp.where(t < tau, E_before, E_after)
         prob_mat = jnp.where(A_old == 1, rho * (1.0 - E_current) + E_current, (1.0 - rho) * E_current)
-        prob_mat = prob_mat * (1.0 - jnp.eye(N, dtype=jnp.float32))
+        prob_mat = prob_mat * (1.0 - jnp.eye(N, dtype=jnp.float64))
         A_upper = jrandom.bernoulli(draw_key, prob_mat).astype(jnp.int32)
         A_new = jnp.where(upper_mask, A_upper, 0)
         A_new = A_new + A_new.T
@@ -425,34 +426,6 @@ def _lag_stat(K_work: Array, lag_mat: Array, reducer: str) -> dict[int, float]:
     return stats
 
 
-def remove_global_lag_effect_test(
-    K: Array,
-    max_lag: float = np.inf,
-    include_diag: bool = False,
-) -> dict[str, Any]:
-    """Python version of `remove_global_lag_effect_test`.
-
-    `max_lag` is kept for API compatibility with the R function, where it is not
-    used by the current implementation.
-    """
-
-    del max_lag
-    K = np.asarray(K, dtype=float)
-    K_work = K.copy()
-    if not include_diag:
-        np.fill_diagonal(K_work, np.nan)
-
-    lag_mat = _lag_matrix(K.shape[0])
-    lag_mean = _lag_stat(K_work, lag_mat, "median")
-
-    adjust_mat = np.mean(K)
-    K_resid = K - adjust_mat
-    if not include_diag:
-        np.fill_diagonal(K_resid, 0.0)
-    K_resid = (K_resid + K_resid.T) / 2.0
-
-    return {"K_resid": K_resid, "lag_mean": lag_mean}
-
 
 def remove_lag_effect(K: Array, max_lag: float = np.inf, s: float = 0.6) -> dict[str, Any]:
     """Remove lag effects from a kernel matrix.
@@ -607,7 +580,7 @@ def remove_lag_effect_jax(K: Array, max_lag: float = np.inf) -> dict[str, Any]:
     because the R/Python smoothing spline step is not JIT-compatible.
     """
 
-    K_jax = jnp.asarray(K, dtype=jnp.float32)
+    K_jax = jnp.asarray(K, dtype=jnp.float64)
     (
         K_resid_raw_mean,
         K_ratio_median,
@@ -855,8 +828,8 @@ def kap_cpd_permutation_pvalue(
     if B < 1:
         raise ValueError("B must be at least 1")
 
-    K1_np = np.asarray(K1, dtype=np.float32)
-    K2_np = np.asarray(K2, dtype=np.float32)
+    K1_np = np.asarray(K1, dtype=np.float64)
+    K2_np = np.asarray(K2, dtype=np.float64)
     if K1_np.shape != K2_np.shape or K1_np.ndim != 2 or K1_np.shape[0] != K1_np.shape[1]:
         raise ValueError("K1 and K2 must be square matrices with the same shape")
 
@@ -923,8 +896,8 @@ def kap_cpd_statistic(
     `tauhat` values use the same 1-based time indexing as the original R code.
     """
 
-    K1_np = np.asarray(K1, dtype=np.float32)
-    K2_np = np.asarray(K2, dtype=np.float32)
+    K1_np = np.asarray(K1, dtype=np.float64)
+    K2_np = np.asarray(K2, dtype=np.float64)
     if K1_np.shape != K2_np.shape or K1_np.ndim != 2 or K1_np.shape[0] != K1_np.shape[1]:
         raise ValueError("K1 and K2 must be square matrices with the same shape")
 
@@ -1000,8 +973,8 @@ def kap_cpd_statistic_dependent(
     """
     K1=remove_lag_effect_jax(K1_raw,max_lag=max_lag)[adjust_type]
     K2=remove_lag_effect_jax(K2_raw,max_lag=max_lag)[adjust_type]
-    K1_np = np.asarray(K1, dtype=np.float32)
-    K2_np = np.asarray(K2, dtype=np.float32)
+    K1_np = np.asarray(K1, dtype=np.float64)
+    K2_np = np.asarray(K2, dtype=np.float64)
     if K1_np.shape != K2_np.shape or K1_np.ndim != 2 or K1_np.shape[0] != K1_np.shape[1]:
         raise ValueError("K1 and K2 must be square matrices with the same shape")
 
@@ -1057,22 +1030,29 @@ def kap_cpd_statistic_dependent(
         "S": _scan_summary(S, n0, n1, field="max"),
     }
 
-@partial(jax.jit, static_argnames=("n0_idx", "n1_idx_exclusive", "B"))
+@partial(jax.jit, static_argnames=("adjust_type", "n0_idx", "n1_idx_exclusive", "B"))
 def _kap_cpd_permutation_pvalue_dependent_jax_core(
     key: jax.Array,
     K1_raw: jax.Array,
     K2_raw: jax.Array,
-    max_lag:float,
-    adjust_type:str,
+    max_lag: float,
+    adjust_type: str,
     r1: float,
     r2: float,
     n0_idx: int,
     n1_idx_exclusive: int,
     B: int,
-) -> tuple[jax.Array, jax.Array]:
-    
-    K1=remove_lag_effect_jax(K1_raw,max_lag=max_lag)[adjust_type]
-    K2=remove_lag_effect_jax(K2_raw,max_lag=max_lag)[adjust_type]
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    def adjust_kernel(K_raw: jax.Array) -> jax.Array:
+        adjusted = _remove_lag_effect_jax_raw(K_raw, max_lag)
+        if adjust_type == "K_resid_raw_mean":
+            return adjusted[0]
+        if adjust_type == "K_ratio_median":
+            return adjusted[1]
+        raise ValueError("adjust_type must be 'K_resid_raw_mean' or 'K_ratio_median'")
+
+    K1 = adjust_kernel(K1_raw)
+    K2 = adjust_kernel(K2_raw)
     observed = _kap_cpd_statistic_jax_core(K1, K2, r1, r2)
     observed_S = observed[12]
     observed_max = jnp.nanmax(observed_S[n0_idx:n1_idx_exclusive])
@@ -1084,19 +1064,22 @@ def _kap_cpd_permutation_pvalue_dependent_jax_core(
         perm = jrandom.permutation(subkey, n)
         K1_raw_perm = K1_raw[perm[:, None], perm[None, :]]
         K2_raw_perm = K2_raw[perm[:, None], perm[None, :]]
-        K1_perm=remove_lag_effect_jax(K1_raw_perm,max_lag=max_lag)[adjust_type]
-        K2_perm=remove_lag_effect_jax(K2_raw_perm,max_lag=max_lag)[adjust_type]
+        K1_perm = adjust_kernel(K1_raw_perm)
+        K2_perm = adjust_kernel(K2_raw_perm)
         permuted = _kap_cpd_statistic_jax_core(K1_perm, K2_perm, r1, r2)
         S_perm = permuted[12]
         return jnp.nanmax(S_perm[n0_idx:n1_idx_exclusive])
 
     max_S = jax.vmap(permutation_max_S)(keys)
     pvalue = jnp.minimum(1.0, jnp.mean(max_S >= observed_max))
-    return pvalue, observed_max
+    return pvalue, observed_max, max_S
+
 
 def kap_cpd_permutation_pvalue_dependent(
     K1: Array,
     K2: Array,
+    adjust_type: str,
+    max_lag: float,
     B: int = 1000,
     r1: float = 0.5,
     r2: float = 2.0,
@@ -1106,19 +1089,13 @@ def kap_cpd_permutation_pvalue_dependent(
     seed: int = 0,
     return_distribution: bool = False,
 ) -> float | dict[str, Any]:
-    """Permutation p-value for the KAP-CPD S statistic, accelerated with JAX.
-
-    This mirrors the R `permpval2` function: it permutes rows/columns of `K1`
-    and `K2` together, recomputes the S scan statistic, and compares the maximum
-    permuted S over `[n0, n1]` to the observed maximum S. The scan window uses
-    the same 1-based indexing convention as the R code.
-    """
+    """Lag-adjusted permutation p-value for the KAP-CPD S statistic."""
 
     if B < 1:
         raise ValueError("B must be at least 1")
 
-    K1_np = np.asarray(K1, dtype=np.float32)
-    K2_np = np.asarray(K2, dtype=np.float32)
+    K1_np = np.asarray(K1, dtype=np.float64)
+    K2_np = np.asarray(K2, dtype=np.float64)
     if K1_np.shape != K2_np.shape or K1_np.ndim != 2 or K1_np.shape[0] != K1_np.shape[1]:
         raise ValueError("K1 and K2 must be square matrices with the same shape")
 
@@ -1141,6 +1118,8 @@ def kap_cpd_permutation_pvalue_dependent(
         jrandom.PRNGKey(seed),
         jnp.asarray(K1_np),
         jnp.asarray(K2_np),
+        float(max_lag),
+        adjust_type,
         float(r1),
         float(r2),
         n0 - 1,
