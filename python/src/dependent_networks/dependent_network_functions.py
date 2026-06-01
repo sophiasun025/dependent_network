@@ -232,6 +232,10 @@ def _calculate_graphlet_kernel_r(graph_list: list[nx.Graph], size: int = 3) -> A
 
         script_path.write_text(
             """
+drive_r_lib <- Sys.getenv("KAP_R_LIB", "/content/drive/MyDrive/R/colab-library")
+if (dir.exists(drive_r_lib)) {
+  .libPaths(c(drive_r_lib, .libPaths()))
+}
 suppressPackageStartupMessages(library(igraph))
 suppressPackageStartupMessages(library(graphkernels))
 args <- commandArgs(trailingOnly = TRUE)
