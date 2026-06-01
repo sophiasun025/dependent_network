@@ -1299,7 +1299,10 @@ def _kap_cpd_permutation_pvalue_dependent_jax_core(
         S_perm = permuted[12]
         return jnp.nanmax(S_perm[n0_idx:n1_idx_exclusive])
 
-    max_S = jax.vmap(permutation_max_S)(keys)
+    # `lax.map` is intentionally used instead of `vmap` here. The dependent
+    # path applies lag adjustment inside every permutation; vmapping that work
+    # can materialize a very large batch of intermediate kernels on GPU.
+    max_S = lax.map(permutation_max_S, keys)
     pvalue = jnp.minimum(1.0, jnp.mean(max_S >= observed_max))
     return pvalue, observed_max, max_S
 
