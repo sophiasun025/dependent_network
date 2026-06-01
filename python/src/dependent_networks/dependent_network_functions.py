@@ -811,9 +811,9 @@ def _kap_cpd_permutation_pvalue_jax_core(
     n0_idx: int,
     n1_idx_exclusive: int,
     B: int,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array]:
     observed = _kap_cpd_statistic_jax_core(K1, K2, r1, r2)
-    observed_S = observed[16]
+    observed_S = observed[12]
     observed_max = jnp.nanmax(observed_S[n0_idx:n1_idx_exclusive])
 
     keys = jrandom.split(key, B)
@@ -824,12 +824,12 @@ def _kap_cpd_permutation_pvalue_jax_core(
         K1_perm = K1[perm[:, None], perm[None, :]]
         K2_perm = K2[perm[:, None], perm[None, :]]
         permuted = _kap_cpd_statistic_jax_core(K1_perm, K2_perm, r1, r2)
-        S_perm = permuted[16]
+        S_perm = permuted[12]
         return jnp.nanmax(S_perm[n0_idx:n1_idx_exclusive])
 
     max_S = jax.vmap(permutation_max_S)(keys)
     pvalue = jnp.minimum(1.0, jnp.mean(max_S >= observed_max))
-    return pvalue, observed_max, max_S
+    return pvalue, observed_max
 
 
 def kap_cpd_permutation_pvalue(
@@ -875,7 +875,7 @@ def kap_cpd_permutation_pvalue(
     if n0 > n1:
         raise ValueError("n0 must be <= n1 after boundary adjustment")
 
-    pvalue, observed_max, max_S = _kap_cpd_permutation_pvalue_jax_core(
+    pvalue, observed_max = _kap_cpd_permutation_pvalue_jax_core(
         jrandom.PRNGKey(seed),
         jnp.asarray(K1_np),
         jnp.asarray(K2_np),
@@ -890,7 +890,6 @@ def kap_cpd_permutation_pvalue(
         return {
             "pvalue": float(pvalue),
             "observed_max_S": float(observed_max),
-            "permuted_max_S": np.asarray(max_S),
             "B": B,
             "n0": n0,
             "n1": n1,
@@ -1058,6 +1057,43 @@ def kap_cpd_statistic_dependent(
         "S": _scan_summary(S, n0, n1, field="max"),
     }
 
+@partial(jax.jit, static_argnames=("n0_idx", "n1_idx_exclusive", "B"))
+def _kap_cpd_permutation_pvalue_dependent_jax_core(
+    key: jax.Array,
+    K1_raw: jax.Array,
+    K2_raw: jax.Array,
+    max_lag:float,
+    adjust_type:str,
+    r1: float,
+    r2: float,
+    n0_idx: int,
+    n1_idx_exclusive: int,
+    B: int,
+) -> tuple[jax.Array, jax.Array]:
+    
+    K1=remove_lag_effect_jax(K1_raw,max_lag=max_lag)[adjust_type]
+    K2=remove_lag_effect_jax(K2_raw,max_lag=max_lag)[adjust_type]
+    observed = _kap_cpd_statistic_jax_core(K1, K2, r1, r2)
+    observed_S = observed[12]
+    observed_max = jnp.nanmax(observed_S[n0_idx:n1_idx_exclusive])
+
+    keys = jrandom.split(key, B)
+    n = K1.shape[0]
+
+    def permutation_max_S(subkey: jax.Array) -> jax.Array:
+        perm = jrandom.permutation(subkey, n)
+        K1_raw_perm = K1_raw[perm[:, None], perm[None, :]]
+        K2_raw_perm = K2_raw[perm[:, None], perm[None, :]]
+        K1_perm=remove_lag_effect_jax(K1_raw_perm,max_lag=max_lag)[adjust_type]
+        K2_perm=remove_lag_effect_jax(K2_raw_perm,max_lag=max_lag)[adjust_type]
+        permuted = _kap_cpd_statistic_jax_core(K1_perm, K2_perm, r1, r2)
+        S_perm = permuted[12]
+        return jnp.nanmax(S_perm[n0_idx:n1_idx_exclusive])
+
+    max_S = jax.vmap(permutation_max_S)(keys)
+    pvalue = jnp.minimum(1.0, jnp.mean(max_S >= observed_max))
+    return pvalue, observed_max
+
 def kap_cpd_permutation_pvalue_dependent(
     K1: Array,
     K2: Array,
@@ -1101,7 +1137,7 @@ def kap_cpd_permutation_pvalue_dependent(
     if n0 > n1:
         raise ValueError("n0 must be <= n1 after boundary adjustment")
 
-    pvalue, observed_max, max_S = _kap_cpd_permutation_pvalue_jax_core(
+    pvalue, observed_max, max_S = _kap_cpd_permutation_pvalue_dependent_jax_core(
         jrandom.PRNGKey(seed),
         jnp.asarray(K1_np),
         jnp.asarray(K2_np),
