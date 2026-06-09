@@ -167,8 +167,9 @@ remove_global_lag_effect_test <- function(K,max_lag,include_diag = FALSE) {
 
 
 remove_lag_effect <- function(K, max_lag = Inf, s = 0.6) {
-  #returns 4 lag adjusted Kernel matrix:
-  #K_resid_raw_mean, K_resid_raw_mean_smooth, K_ratio_mean, K_ratio_mean_smooth
+  # Returns lag-adjusted kernel matrices:
+  # K_resid_raw_mean, K_resid_mean_mm, K_resid_smooth_mean,
+  # K_ratio_median, K_ratio_median_smooth
   n <- nrow(K)
   K_work <- K
   diag(K_work) <- NA
@@ -219,13 +220,14 @@ remove_lag_effect <- function(K, max_lag = Inf, s = 0.6) {
     x_smooth
   }
   
-
+  
   
   #lag-specific adjustment families and convert the lags into matrices
   lag_adjust_raw_mean <- lag_mean
+  lag_adjust_raw_mean_plus_mean_median <- lag_mean-lag_mean_median
   lag_adjust_raw_median <- lag_median
-  lag_adjust_raw_mean_smooth <- smooth_adjustment(lag_adjust_raw_mean)
-  lag_adjust_raw_median_smooth <- smooth_adjustment(lag_adjust_raw_median)
+  lag_adjust_smooth_mean <- smooth_adjustment(lag_adjust_raw_mean)
+  lag_adjust_smooth_median <- smooth_adjustment(lag_adjust_raw_median)
   
   build_adjustment_matrix <- function(lag_adjustment) {
     adjust_mat <- matrix(
@@ -239,21 +241,27 @@ remove_lag_effect <- function(K, max_lag = Inf, s = 0.6) {
   
   #as adj matrix
   adjust_mat_raw_mean <- build_adjustment_matrix(lag_adjust_raw_mean)
+  adjust_mat_raw_mean_plus_mean_median<-build_adjustment_matrix(lag_adjust_raw_mean_plus_mean_median)
   adjust_mat_raw_median <- build_adjustment_matrix(lag_adjust_raw_median)
-  adjust_mat_raw_mean_smooth <- build_adjustment_matrix(lag_adjust_raw_mean_smooth)
-  adjust_mat_raw_median_smooth <- build_adjustment_matrix(lag_adjust_raw_median_smooth)
+  adjust_mat_smooth_mean <- build_adjustment_matrix(lag_adjust_smooth_mean)
+  adjust_mat_smooth_median <- build_adjustment_matrix(lag_adjust_smooth_median)
   
   #only adjust up to max lag
   use_idx <- lag_mat <= max_lag
   use_idx[lag_mat == 0] <- FALSE
   adjust_mat_raw_mean[!use_idx] <- 0
-  adjust_mat_raw_mean_smooth[!use_idx] <- 0
+  adjust_mat_smooth_mean[!use_idx] <- 0
+  adjust_mat_raw_median[!use_idx] <- 0
+  adjust_mat_smooth_median[!use_idx] <- 0
+  adjust_mat_raw_mean_plus_mean_median[!use_idx] <- 0
+  
   residual_kernel <- function(adjust_mat) {
     K_resid <- K - adjust_mat
     diag(K_resid) <- 0
     (K_resid + t(K_resid)) / 2
   }
-
+  
+  
   ratio_kernel <- function(adjust_mat,mm) {
     K_ratio <- K
     ratio_idx <- is.finite(adjust_mat) & adjust_mat != 0
@@ -266,27 +274,27 @@ remove_lag_effect <- function(K, max_lag = Inf, s = 0.6) {
   #construct adjusted Kernel matrix
   #1,2
   K_resid_raw_mean <- residual_kernel(adjust_mat_raw_mean)
-  K_resid_raw_mean_smooth <- residual_kernel(adjust_mat_raw_mean_smooth)
+  K_resid_mean_mm <- residual_kernel(adjust_mat_raw_mean_plus_mean_median)
+  K_resid_smooth_mean <- residual_kernel(adjust_mat_smooth_mean)
   #3,4
   # K_ratio_mean <- ratio_kernel(adjust_mat_raw_mean,lag_mean_mean)
   # K_ratio_mean_smooth <- ratio_kernel(adjust_mat_raw_mean_smooth,lag_mean_mean)
   #3,4
   K_ratio_median <- ratio_kernel(adjust_mat_raw_median,lag_median_median)
-  K_ratio_median_smooth <- ratio_kernel(adjust_mat_raw_median_smooth,lag_median_median)
+  K_ratio_median_smooth <- ratio_kernel(adjust_mat_smooth_median,lag_median_median)
   
   list(
     K_resid_raw_mean = K_resid_raw_mean,
-    K_resid_raw_mean_smooth = K_resid_raw_mean_smooth,
+    K_resid_mean_mm = K_resid_mean_mm,
+    K_resid_smooth_mean = K_resid_smooth_mean,
     # K_ratio_mean=K_ratio_mean,
     # K_ratio_mean_smooth=K_ratio_mean_smooth,
     K_ratio_median=K_ratio_median,
     K_ratio_median_smooth=K_ratio_median_smooth,
-    
     lag_mean = lag_mean,
     lag_median = lag_median,
     lag_mean_sd = lag_mean_sd,
-    lag_adjust_raw_mean_smooth = lag_adjust_raw_mean_smooth,
-   
+    lag_adjust_smooth_mean = lag_adjust_smooth_mean,
     max_lag = max_lag
   )
 }
